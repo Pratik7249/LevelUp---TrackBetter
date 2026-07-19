@@ -53,11 +53,13 @@ const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 type DetailsTab = "add" | "update";
 type ReturnForm = {
   asOfMonth: string;
+  oneMonth: string;
   threeMonth: string;
   sixMonth: string;
   oneYear: string;
   threeYear: string;
   fiveYear: string;
+  allTime: string;
 };
 
 function isFundAsset(assetClass: AssetClass) {
@@ -80,11 +82,13 @@ function returnForm(month: string, snapshot?: FundReturnSnapshot): ReturnForm {
   const show = (value: number | null | undefined) => value === null || value === undefined ? "" : String(value);
   return {
     asOfMonth: snapshot?.asOfMonth || month,
+    oneMonth: show(snapshot?.oneMonth),
     threeMonth: show(snapshot?.threeMonth),
     sixMonth: show(snapshot?.sixMonth),
     oneYear: show(snapshot?.oneYear),
     threeYear: show(snapshot?.threeYear),
-    fiveYear: show(snapshot?.fiveYear)
+    fiveYear: show(snapshot?.fiveYear),
+    allTime: show(snapshot?.allTime)
   };
 }
 
@@ -97,11 +101,13 @@ function parseOptionalReturn(value: string) {
 function parseReturnForm(value: ReturnForm): FundReturnSnapshot {
   return {
     asOfMonth: value.asOfMonth,
+    oneMonth: parseOptionalReturn(value.oneMonth),
     threeMonth: parseOptionalReturn(value.threeMonth),
     sixMonth: parseOptionalReturn(value.sixMonth),
     oneYear: parseOptionalReturn(value.oneYear),
     threeYear: parseOptionalReturn(value.threeYear),
-    fiveYear: parseOptionalReturn(value.fiveYear)
+    fiveYear: parseOptionalReturn(value.fiveYear),
+    allTime: parseOptionalReturn(value.allTime)
   };
 }
 
@@ -112,11 +118,13 @@ function formatReturnValue(value: number | null) {
 
 function returnSummary(snapshot: FundReturnSnapshot) {
   const rows = [
+    ["1M", snapshot.oneMonth],
     ["3M", snapshot.threeMonth],
     ["6M", snapshot.sixMonth],
     ["1Y", snapshot.oneYear],
     ["3Y", snapshot.threeYear],
-    ["5Y", snapshot.fiveYear]
+    ["5Y", snapshot.fiveYear],
+    ["All", snapshot.allTime]
   ].filter(([, value]) => value !== null);
   return rows.length ? rows.map(([label, value]) => `${label} ${formatReturnValue(value as number)}`).join(" · ") : "Returns not added";
 }
@@ -179,17 +187,19 @@ function AllocationEditor({ value, onChange }: { value: FundAllocation[]; onChan
 
 function ReturnSnapshotEditor({ value, onChange }: { value: ReturnForm; onChange: (next: ReturnForm) => void }) {
   const fields: Array<{ key: keyof ReturnForm; label: string }> = [
+    { key: "oneMonth", label: "1-month return" },
     { key: "threeMonth", label: "3-month return" },
     { key: "sixMonth", label: "6-month return" },
     { key: "oneYear", label: "1-year return" },
     { key: "threeYear", label: "3-year return" },
-    { key: "fiveYear", label: "5-year return" }
+    { key: "fiveYear", label: "5-year return" },
+    { key: "allTime", label: "All-time return" }
   ];
   return (
     <div className="field full return-entry-panel">
       <div className="form-intro">
-        <strong>Fund return snapshot</strong>
-        <span>Add these published returns once. Update them only when you want to refresh fund analytics.</span>
+        <strong>Published return data</strong>
+        <span>Enter the latest published returns for the selected fund. This is maintained separately from portfolio value updates.</span>
       </div>
       <div className="form-grid return-entry-grid">
         <div className="field"><label>Return data month</label><input type="month" value={value.asOfMonth} onChange={(event) => onChange({ ...value, asOfMonth: event.target.value })} /></div>
@@ -242,23 +252,43 @@ function HoldingRow({ holding, month, onEdit }: { holding: Holding; month: strin
   );
 }
 
-function projectionRows(startingValue: number, monthlySip: number, annualReturn: number, annualStepUp: number, startYear: number, endYear: number) {
-  const firstYear = Math.min(startYear, endYear);
-  const lastYear = Math.max(startYear, endYear);
+function projectionRows(
+  currentPortfolioValue: number,
+  includeCurrentInvestments: boolean,
+  monthlySip: number,
+  annualReturn: number,
+  annualStepUp: number,
+  startMonth: string,
+  endYear: number
+) {
+  const [startYear, startMonthNumber] = startMonth.split("-").map(Number);
+  if (!startYear || !startMonthNumber || endYear < startYear) return [];
+
   const monthlyRate = Math.pow(1 + annualReturn / 100, 1 / 12) - 1;
-  let value = Math.max(0, startingValue);
+  let value = includeCurrentInvestments ? Math.max(0, currentPortfolioValue) : 0;
+  const openingCapital = value;
   let contribution = Math.max(0, monthlySip);
   let cumulativeContribution = 0;
-  return Array.from({ length: Math.min(41, lastYear - firstYear + 1) }, (_, yearIndex) => {
-    const year = firstYear + yearIndex;
+  const rows: Array<{
+    label: string;
+    year: number;
+    annualContribution: number;
+    cumulativeContribution: number;
+    capital: number;
+    projected: number;
+    gain: number;
+  }> = [];
+
+  for (let year = startYear; year <= Math.min(endYear, startYear + 40); year += 1) {
+    const firstMonth = year === startYear ? startMonthNumber : 1;
     let annualContribution = 0;
-    for (let month = 0; month < 12; month += 1) {
+    for (let month = firstMonth; month <= 12; month += 1) {
       value = value * (1 + monthlyRate) + contribution;
       annualContribution += contribution;
     }
     cumulativeContribution += annualContribution;
-    const capital = startingValue + cumulativeContribution;
-    const row = {
+    const capital = openingCapital + cumulativeContribution;
+    rows.push({
       label: String(year),
       year,
       annualContribution,
@@ -266,10 +296,11 @@ function projectionRows(startingValue: number, monthlySip: number, annualReturn:
       capital,
       projected: value,
       gain: value - capital
-    };
+    });
     contribution *= 1 + Math.max(0, annualStepUp) / 100;
-    return row;
-  });
+  }
+
+  return rows;
 }
 
 export default function PortfolioPage() {
@@ -308,19 +339,21 @@ export default function PortfolioPage() {
   }, [stableMonth, state]);
 
   const stableYear = Number(stableMonth.slice(0, 4));
-  const [customStartYear, setCustomStartYear] = useState(String(stableYear));
+  const [customStartMonth, setCustomStartMonth] = useState(stableMonth);
   const [customEndYear, setCustomEndYear] = useState(String(stableYear + 10));
+  const [customIncludeCurrent, setCustomIncludeCurrent] = useState(true);
   const [customMonthlySip, setCustomMonthlySip] = useState(String(currentMonthlySip || 0));
   const [customReturn, setCustomReturn] = useState(String(Math.round(weightedExpectedReturn(state, stableMonth) * 10) / 10 || 12));
   const [customStepUp, setCustomStepUp] = useState(String(state.preferences.portfolioDefaultStepUpPercent || 0));
   const customProjectionRows = useMemo(() => projectionRows(
     summary.current,
+    customIncludeCurrent,
     Number(customMonthlySip) || 0,
     Number(customReturn) || 0,
     Number(customStepUp) || 0,
-    Number(customStartYear) || stableYear,
+    customStartMonth,
     Number(customEndYear) || stableYear
-  ), [customEndYear, customMonthlySip, customReturn, customStartYear, customStepUp, stableYear, summary.current]);
+  ), [customEndYear, customIncludeCurrent, customMonthlySip, customReturn, customStartMonth, customStepUp, stableYear, summary.current]);
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -347,6 +380,12 @@ export default function PortfolioPage() {
   const [editAllocation, setEditAllocation] = useState<FundAllocation[]>([{ category: "Index Fund", percentage: 100 }]);
   const [editReturns, setEditReturns] = useState<ReturnForm>(() => returnForm(stableMonth));
   const [editMessage, setEditMessage] = useState("");
+
+  const fundHoldings = useMemo(() => state.holdings.filter((holding) => isFundAsset(holding.assetClass)), [state.holdings]);
+  const [returnHoldingId, setReturnHoldingId] = useState(fundHoldings[0]?.id ?? "");
+  const returnHolding = fundHoldings.find((holding) => holding.id === returnHoldingId) ?? null;
+  const [returnEditor, setReturnEditor] = useState<ReturnForm>(() => returnForm(stableMonth));
+  const [returnMessage, setReturnMessage] = useState("");
 
   const [additionalDate, setAdditionalDate] = useState(toDateInput());
   const [additionalAmount, setAdditionalAmount] = useState("");
@@ -383,9 +422,10 @@ export default function PortfolioPage() {
   useEffect(() => {
     if (!selectedHoldingId && state.holdings[0]) setSelectedHoldingId(state.holdings[0].id);
     if (!sipHoldingId && state.holdings[0]) setSipHoldingId(state.holdings[0].id);
+    if (!returnHoldingId && fundHoldings[0]) setReturnHoldingId(fundHoldings[0].id);
     if (!additionalAccountId && state.accounts[0]) setAdditionalAccountId(state.accounts[0].id);
     if (!sipAccountId && state.accounts[0]) setSipAccountId(state.accounts[0].id);
-  }, [additionalAccountId, selectedHoldingId, sipAccountId, sipHoldingId, state.accounts, state.holdings]);
+  }, [additionalAccountId, fundHoldings, returnHoldingId, selectedHoldingId, sipAccountId, sipHoldingId, state.accounts, state.holdings]);
 
   useEffect(() => {
     if (!selectedHolding) return;
@@ -415,6 +455,12 @@ export default function PortfolioPage() {
     setSipStepUp(String(sipHolding.sip.stepUpPercent || 0));
     setSipMessage("");
   }, [currentMonth, sipHolding, state.accounts]);
+
+  useEffect(() => {
+    if (!returnHolding) return;
+    setReturnEditor(returnForm(returnHolding.returnSnapshot.asOfMonth || stableMonth, returnHolding.returnSnapshot));
+    setReturnMessage("");
+  }, [returnHolding, stableMonth]);
 
   const activeSipHoldings = useMemo(() => state.holdings.filter((holding) => holding.sip.enabled), [state.holdings]);
   const sipCalendarRows = useMemo(() => activeSipHoldings.map((holding) => ({
@@ -626,6 +672,22 @@ export default function PortfolioPage() {
     });
     updateHoldingValuation(selectedHolding.id, editValueMonth, current);
     setEditMessage(`Holding and ${monthLabel(editValueMonth)} value saved.`);
+  }
+
+  function savePublishedReturns(event: FormEvent) {
+    event.preventDefault();
+    if (!returnHolding) {
+      setReturnMessage("Select a mutual fund or ETF first.");
+      return;
+    }
+    if (!returnEditor.asOfMonth) {
+      setReturnMessage("Select the return data month.");
+      return;
+    }
+    updateHolding(returnHolding.id, {
+      returnSnapshot: parseReturnForm(returnEditor)
+    });
+    setReturnMessage("Published return data saved.");
   }
 
   function submitAdditional(event: FormEvent) {
@@ -923,30 +985,62 @@ export default function PortfolioPage() {
           </div> : <EmptyState title="No goals yet" text="Open Goal setup, add a goal and assign the current amount and monthly SIP intended for it." />}
         </CollapsibleCard>
 
+        <CollapsibleCard title="Fund return analytics" eyebrow="Published returns maintained separately from your portfolio value" className="span-3">
+          {!fundHoldings.length ? <EmptyState title="No mutual fund or ETF" text="Add a mutual fund or ETF before entering published return data." /> : <>
+            <form className="form-grid" onSubmit={savePublishedReturns}>
+              <div className="field"><label>Select fund</label><select value={returnHoldingId} onChange={(event) => setReturnHoldingId(event.target.value)}>{fundHoldings.map((holding) => <option value={holding.id} key={holding.id}>{holding.name}</option>)}</select></div>
+              <div className="field full">
+                <ReturnSnapshotEditor value={returnEditor} onChange={setReturnEditor} />
+              </div>
+              <div className="field full"><button className="button full">Save return snapshot</button></div>
+              {returnMessage && <div className={`form-message field full ${returnMessage.includes("saved") ? "success" : "info"}`}>{returnMessage}</div>}
+            </form>
+            {returnHolding && <div className="section-gap">
+              <div className="form-intro"><strong>{returnHolding.name}</strong><span>As of {monthLabel(returnHolding.returnSnapshot.asOfMonth)} · {returnSummary(returnHolding.returnSnapshot)}</span></div>
+              <div className="return-analytics-grid section-gap">
+                {[
+                  ["1M", returnHolding.returnSnapshot.oneMonth],
+                  ["3M", returnHolding.returnSnapshot.threeMonth],
+                  ["6M", returnHolding.returnSnapshot.sixMonth],
+                  ["1Y", returnHolding.returnSnapshot.oneYear],
+                  ["3Y", returnHolding.returnSnapshot.threeYear],
+                  ["5Y", returnHolding.returnSnapshot.fiveYear],
+                  ["All", returnHolding.returnSnapshot.allTime]
+                ].map(([label, value]) => <div className="advice-stat" key={String(label)}><span>{label} return</span><strong className={typeof value === "number" && value >= 0 ? "positive" : typeof value === "number" ? "negative" : ""}>{formatReturnValue(value as number | null)}</strong></div>)}
+              </div>
+              <div className="notice">
+                <strong>How to read this</strong>
+                <p>These are published fund-return figures entered by you. They are separate from your personal gain, SIP cash flow and XIRR.</p>
+              </div>
+            </div>}
+          </>}
+        </CollapsibleCard>
+
         <CollapsibleCard title="Year-wise growth" eyebrow="Actual stored history" className="span-2">
           {yearlyGrowthData.length ? <LineChart data={yearlyGrowthData} series={[{ key: "invested", label: "Invested" }, { key: "value", label: "Value" }]} height={250} /> : <EmptyState title="Not enough history" text="Record monthly values over time to see year-wise growth." />}
         </CollapsibleCard>
 
-        <CollapsibleCard title="Custom year predictor" eyebrow="Select start and end year" className="span-1">
+        <CollapsibleCard title="Custom growth predictor" eyebrow="Choose the exact starting month and ending year" className="span-1">
           <form className="form-grid compact-predictor-grid" onSubmit={(event) => event.preventDefault()}>
-            <div className="field"><label>Starting year</label><input type="number" min="2000" max="2100" value={customStartYear} onChange={(event) => setCustomStartYear(event.target.value)} /></div>
-            <div className="field"><label>Ending year</label><input type="number" min={customStartYear || "2000"} max="2100" value={customEndYear} onChange={(event) => setCustomEndYear(event.target.value)} /></div>
+            <label className="toggle-field field full"><input type="checkbox" checked={customIncludeCurrent} onChange={(event) => setCustomIncludeCurrent(event.target.checked)} /><span><strong>Include current portfolio</strong><small>Start the prediction with the latest stored portfolio value of {currency(summary.current)}.</small></span></label>
+            <div className="field"><label>Starting month</label><input type="month" min="2000-01" max="2100-12" value={customStartMonth} onChange={(event) => setCustomStartMonth(event.target.value)} /></div>
+            <div className="field"><label>Ending year</label><input type="number" min={customStartMonth.slice(0, 4) || "2000"} max="2100" value={customEndYear} onChange={(event) => setCustomEndYear(event.target.value)} /></div>
             <div className="field"><label>Monthly SIP</label><input type="number" min="0" value={customMonthlySip} onChange={(event) => setCustomMonthlySip(event.target.value)} /></div>
             <div className="field"><label>Annual return</label><div className="percentage-input"><input type="number" min="-50" max="50" step="0.1" value={customReturn} onChange={(event) => setCustomReturn(event.target.value)} /><span>%</span></div></div>
             <div className="field"><label>Annual step-up</label><div className="percentage-input"><input type="number" min="0" max="100" step="0.5" value={customStepUp} onChange={(event) => setCustomStepUp(event.target.value)} /><span>%</span></div></div>
           </form>
         </CollapsibleCard>
 
-        <CollapsibleCard title="Custom projection by year" eyebrow={`${customStartYear || stableYear} to ${customEndYear || stableYear}`} className="span-3">
+        <CollapsibleCard title="Custom projection by year" eyebrow={`${monthLabel(customStartMonth)} to ${customEndYear || stableYear}`} className="span-3">
           {customProjectionRows.length ? <>
-            <LineChart data={customProjectionRows} series={[{ key: "capital", label: "Current value + contributions" }, { key: "projected", label: "Projected value" }]} height={260} />
+            <LineChart data={customProjectionRows} series={[{ key: "capital", label: customIncludeCurrent ? "Current portfolio + contributions" : "Contributions" }, { key: "projected", label: "Projected value" }]} height={260} />
             <div className="table-wrap section-gap">
               <table className="prediction-table">
                 <thead><tr><th>Year</th><th>SIP added that year</th><th>Total new SIP added</th><th>Projected value</th><th>Projected market gain</th></tr></thead>
                 <tbody>{customProjectionRows.map((row) => <tr key={row.year}><td><strong>{row.year}</strong></td><td><MoneyValue value={row.annualContribution} /></td><td><MoneyValue value={row.cumulativeContribution} /></td><td><MoneyValue value={row.projected} /></td><td className={row.gain >= 0 ? "positive" : "negative"}><MoneyValue value={row.gain} signed /></td></tr>)}</tbody>
               </table>
             </div>
-            <div className="projection-disclaimer">Projection starts with the latest stored portfolio value of {currency(summary.current)} ({rupeesInWords(summary.current)}). It is an estimate, not a guaranteed return.</div>
+            <div className="projection-disclaimer">{customIncludeCurrent ? <>Projection includes the latest stored portfolio value of {currency(summary.current)} ({rupeesInWords(summary.current)}).</> : <>Projection starts from zero and includes only the SIP contributions entered above.</>} The first year begins in {monthLabel(customStartMonth)}. This is an estimate, not a guaranteed return.</div>
           </> : <EmptyState title="Choose a valid year range" text="Ending year must be the same as or later than the starting year." />}
         </CollapsibleCard>
 
@@ -980,7 +1074,7 @@ export default function PortfolioPage() {
             <div className="field"><label>Current value</label><input type="number" min="0" value={currentValue} onChange={(event) => setCurrentValue(event.target.value)} /></div>
             <div className="field"><label>Individual holding goal</label><input type="number" min="0" value={fundGoal} onChange={(event) => setFundGoal(event.target.value)} /></div>
             <div className="field"><label>Expected annual return</label><div className="percentage-input"><input type="number" min="-50" max="50" step="0.1" value={expectedReturn} onChange={(event) => setExpectedReturn(event.target.value)} /><span>%</span></div></div>
-            {isFundAsset(assetClass) && <><AllocationEditor value={newAllocation} onChange={setNewAllocation} /><ReturnSnapshotEditor value={newReturns} onChange={setNewReturns} /></>}
+            {isFundAsset(assetClass) && <AllocationEditor value={newAllocation} onChange={setNewAllocation} />}
             <div className="field full"><button className="button full">Add holding</button></div>
             {addMessage && <div className={`form-message field full ${addMessage.includes("added") ? "success" : "info"}`}>{addMessage}</div>}
           </form> : <>
@@ -995,7 +1089,7 @@ export default function PortfolioPage() {
                 <div className="field"><label>Current value for month</label><input type="number" min="0" value={editCurrentValue} onChange={(event) => setEditCurrentValue(event.target.value)} /></div>
                 <div className="field"><label>Individual holding goal</label><input type="number" min="0" value={editGoal} onChange={(event) => setEditGoal(event.target.value)} /></div>
                 <div className="field"><label>Expected annual return</label><div className="percentage-input"><input type="number" min="-50" max="50" step="0.1" value={editExpectedReturn} onChange={(event) => setEditExpectedReturn(event.target.value)} /><span>%</span></div></div>
-                {isFundAsset(editAssetClass) && <><AllocationEditor value={editAllocation} onChange={setEditAllocation} /><ReturnSnapshotEditor value={editReturns} onChange={setEditReturns} /></>}
+                {isFundAsset(editAssetClass) && <AllocationEditor value={editAllocation} onChange={setEditAllocation} />}
                 <div className="field full"><button className="button full">Save holding and monthly value</button></div>
                 {editMessage && <div className={`form-message field full ${editMessage.includes("saved") ? "success" : "info"}`}>{editMessage}</div>}
               </form>

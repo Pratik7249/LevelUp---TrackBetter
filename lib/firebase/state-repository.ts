@@ -102,11 +102,13 @@ function holdingPayload(holding: Holding) {
     expectedAnnualReturn: Number(holding.expectedAnnualReturn) || 12,
     returnSnapshot: {
       asOfMonth: holding.returnSnapshot?.asOfMonth || holding.investmentDate.slice(0, 7),
+      oneMonth: holding.returnSnapshot?.oneMonth ?? null,
       threeMonth: holding.returnSnapshot?.threeMonth ?? null,
       sixMonth: holding.returnSnapshot?.sixMonth ?? null,
       oneYear: holding.returnSnapshot?.oneYear ?? null,
       threeYear: holding.returnSnapshot?.threeYear ?? null,
-      fiveYear: holding.returnSnapshot?.fiveYear ?? null
+      fiveYear: holding.returnSnapshot?.fiveYear ?? null,
+      allTime: holding.returnSnapshot?.allTime ?? null
     },
     allocationBreakdown: Array.isArray(holding.allocationBreakdown)
       ? holding.allocationBreakdown

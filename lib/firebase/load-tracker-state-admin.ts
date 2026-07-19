@@ -101,11 +101,13 @@ export async function loadTrackerStateAdmin(uid: string): Promise<TrackerState |
         };
         return {
           asOfMonth: typeof snapshot.asOfMonth === "string" ? snapshot.asOfMonth : investmentDate.slice(0, 7),
+          oneMonth: numberOrNull(snapshot.oneMonth),
           threeMonth: numberOrNull(snapshot.threeMonth),
           sixMonth: numberOrNull(snapshot.sixMonth),
           oneYear: numberOrNull(snapshot.oneYear),
           threeYear: numberOrNull(snapshot.threeYear),
-          fiveYear: numberOrNull(snapshot.fiveYear)
+          fiveYear: numberOrNull(snapshot.fiveYear),
+          allTime: numberOrNull(snapshot.allTime)
         };
       })(),
       allocationBreakdown: Array.isArray(data.allocationBreakdown)

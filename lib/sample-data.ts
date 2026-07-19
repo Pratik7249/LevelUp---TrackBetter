@@ -84,11 +84,13 @@ function normalizeHolding(value: Partial<Holding> & Record<string, unknown>): Ho
         asOfMonth: typeof snapshot.asOfMonth === "string" && /^\d{4}-\d{2}$/.test(snapshot.asOfMonth)
           ? snapshot.asOfMonth
           : currentMonth,
+        oneMonth: normalizeReturnNumber(snapshot.oneMonth),
         threeMonth: normalizeReturnNumber(snapshot.threeMonth),
         sixMonth: normalizeReturnNumber(snapshot.sixMonth),
         oneYear: normalizeReturnNumber(snapshot.oneYear),
         threeYear: normalizeReturnNumber(snapshot.threeYear),
-        fiveYear: normalizeReturnNumber(snapshot.fiveYear)
+        fiveYear: normalizeReturnNumber(snapshot.fiveYear),
+        allTime: normalizeReturnNumber(snapshot.allTime)
       };
     })(),
     monthlyValues: monthlyValues.sort((a, b) => a.month.localeCompare(b.month)),

@@ -26,11 +26,13 @@ export type FundAllocation = {
 
 export type FundReturnSnapshot = {
   asOfMonth: string;
+  oneMonth: number | null;
   threeMonth: number | null;
   sixMonth: number | null;
   oneYear: number | null;
   threeYear: number | null;
   fiveYear: number | null;
+  allTime: number | null;
 };
 
 export type Account = {
