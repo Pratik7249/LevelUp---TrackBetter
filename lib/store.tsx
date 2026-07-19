@@ -18,6 +18,7 @@ import {
   signOut,
   type User
 } from "firebase/auth";
+import { sipAmountForMonth, toMonthInput } from "./analytics";
 import { ensureAuthPersistence, firebaseAuth, firestore, isFirebaseConfigured } from "./firebase/client";
 import {
   createTransaction,
@@ -34,8 +35,8 @@ import {
   saveHolding,
   savePreferences,
   saveReportSettings,
+  setDailyCheckin,
   setHabitCompletion,
-  setMessCompletion,
   subscribeToWorkspace
 } from "./firebase/state-repository";
 import { cloneDefaultState, normalizeState } from "./sample-data";
@@ -45,11 +46,12 @@ import type {
   Category,
   Habit,
   Holding,
+  InvestmentEntry,
   TrackerState,
   Transaction
 } from "./types";
 
-const LOCAL_KEY = "trackbetter-state-v3";
+const LOCAL_KEY = "trackbetter-state-v4";
 const REQUIRED_SNAPSHOTS = 9;
 
 type SyncStatus = "local" | "loading" | "syncing" | "synced" | "error";
@@ -68,17 +70,20 @@ type StoreValue = {
   waitForSync: () => Promise<void>;
   addTransaction: (transaction: Omit<Transaction, "id">) => void;
   removeTransaction: (transactionId: string) => void;
+  setSipPayment: (holdingId: string, monthKey: string, paid: boolean) => void;
   addAccount: (account: Omit<Account, "id">) => void;
   removeAccount: (accountId: string) => void;
   addCategory: (category: Omit<Category, "id">) => void;
   removeCategory: (categoryId: string) => void;
   addHolding: (holding: Omit<Holding, "id">) => void;
-  updateHolding: (holdingId: string, values: Partial<Pick<Holding, "invested" | "currentValue">>) => void;
+  updateHolding: (holdingId: string, values: Partial<Omit<Holding, "id">>) => void;
+  addHoldingInvestment: (holdingId: string, entry: Omit<InvestmentEntry, "id">) => void;
+  updateHoldingValuation: (holdingId: string, month: string, value: number) => void;
   removeHolding: (holdingId: string) => void;
   addHabit: (habit: Omit<Habit, "id" | "completions">) => void;
   removeHabit: (habitId: string) => void;
   toggleHabit: (habitId: string, date: string) => void;
-  toggleMess: (date: string) => void;
+  toggleDailyCheckin: (date: string) => void;
   updateReportSettings: (settings: TrackerState["reportSettings"]) => void;
   updatePreferences: (preferences: AppPreferences) => void;
   resetData: () => void;
@@ -234,9 +239,9 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
             }));
             markLoaded("habitLogs");
           },
-          messLogs: (messCompletions) => {
-            setState((current) => ({ ...current, messCompletions }));
-            markLoaded("messLogs");
+          dailyCheckins: (dailyCheckins) => {
+            setState((current) => ({ ...current, dailyCheckins }));
+            markLoaded("dailyCheckins");
           },
           reports: (reportSettings) => {
             setState((current) => ({ ...current, reportSettings }));
@@ -267,6 +272,7 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
       unsubscribeAuth();
     };
   }, [markLoaded]);
+
 
   const signInGoogle = useCallback(async () => {
     if (!firebaseAuth || !isFirebaseConfigured) {
@@ -333,6 +339,50 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
       }));
       if (firestore && user) void queueCloudWrite(() => deleteTransactionDocument(firestore!, user.uid, transactionId));
     },
+    setSipPayment: (holdingId, monthKey, paid) => {
+      const holding = state.holdings.find((item) => item.id === holdingId);
+      if (!holding || !/^\d{4}-\d{2}$/.test(monthKey)) return;
+      const transactionId = `sip-${holding.id}-${monthKey}`;
+      const existing = state.transactions.find((item) => item.id === transactionId);
+
+      if (!paid) {
+        if (!existing) return;
+        setOptimisticState((current) => ({
+          ...current,
+          accounts: current.accounts.map((account) => account.id === existing.accountId
+            ? { ...account, balance: account.balance + existing.amount }
+            : account),
+          transactions: current.transactions.filter((item) => item.id !== transactionId)
+        }));
+        if (firestore && user) void queueCloudWrite(() => deleteTransactionDocument(firestore!, user.uid, transactionId));
+        return;
+      }
+
+      if (existing || !holding.sip.enabled || !holding.sip.accountId) return;
+      const amount = sipAmountForMonth(holding, monthKey);
+      if (amount <= 0) return;
+      const day = String(Math.min(28, Math.max(1, holding.sip.dayOfMonth || 5))).padStart(2, "0");
+      const transaction: Transaction = {
+        id: transactionId,
+        type: "investment",
+        description: `SIP · ${holding.name}`,
+        amount,
+        date: `${monthKey}-${day}`,
+        accountId: holding.sip.accountId,
+        category: "Mutual Funds",
+        subcategory: "SIP",
+        mainCategory: "Investment",
+        note: "Marked paid from SIP tracker calendar."
+      };
+      setOptimisticState((current) => ({
+        ...current,
+        accounts: current.accounts.map((account) => account.id === transaction.accountId
+          ? { ...account, balance: account.balance - transaction.amount }
+          : account),
+        transactions: [transaction, ...current.transactions]
+      }));
+      if (firestore && user) void queueCloudWrite(() => createTransaction(firestore!, user.uid, transaction));
+    },
     addAccount: (accountInput) => {
       const account: Account = { ...accountInput, id: makeId("account") };
       setOptimisticState((current) => ({ ...current, accounts: [...current.accounts, account] }));
@@ -361,12 +411,29 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
     updateHolding: (holdingId, values) => {
       const existing = state.holdings.find((item) => item.id === holdingId);
       if (!existing) return;
-      const currentValue = values.currentValue ?? existing.currentValue;
-      const month = new Intl.DateTimeFormat("en-IN", { month: "short", year: "2-digit" }).format(new Date());
+      const updated: Holding = { ...existing, ...values };
+      const nextHoldings = state.holdings.map((item) => item.id === holdingId ? updated : item);
+      setOptimisticState((current) => ({ ...current, holdings: current.holdings.map((item) => item.id === holdingId ? updated : item) }));
+      if (firestore && user) void queueCloudWrite(() => saveHolding(firestore!, user.uid, updated, nextHoldings));
+    },
+    addHoldingInvestment: (holdingId, input) => {
+      const existing = state.holdings.find((item) => item.id === holdingId);
+      if (!existing || input.amount <= 0) return;
+      const entry: InvestmentEntry = { ...input, id: makeId("investment") };
+      const updated: Holding = { ...existing, additionalInvestments: [...existing.additionalInvestments, entry] };
+      const nextHoldings = state.holdings.map((item) => item.id === holdingId ? updated : item);
+      setOptimisticState((current) => ({ ...current, holdings: current.holdings.map((item) => item.id === holdingId ? updated : item) }));
+      if (firestore && user) void queueCloudWrite(() => saveHolding(firestore!, user.uid, updated, nextHoldings));
+    },
+    updateHoldingValuation: (holdingId, month, currentValue) => {
+      const existing = state.holdings.find((item) => item.id === holdingId);
+      if (!existing || currentValue < 0 || !/^\d{4}-\d{2}$/.test(month)) return;
       const monthlyValues = existing.monthlyValues.some((point) => point.month === month)
         ? existing.monthlyValues.map((point) => point.month === month ? { ...point, value: currentValue } : point)
         : [...existing.monthlyValues, { month, value: currentValue }];
-      const updated: Holding = { ...existing, ...values, monthlyValues };
+      monthlyValues.sort((a, b) => a.month.localeCompare(b.month));
+      const latestMonth = monthlyValues[monthlyValues.length - 1]?.month;
+      const updated: Holding = { ...existing, monthlyValues, currentValue: latestMonth === month || month === toMonthInput() ? currentValue : existing.currentValue };
       const nextHoldings = state.holdings.map((item) => item.id === holdingId ? updated : item);
       setOptimisticState((current) => ({ ...current, holdings: current.holdings.map((item) => item.id === holdingId ? updated : item) }));
       if (firestore && user) void queueCloudWrite(() => saveHolding(firestore!, user.uid, updated, nextHoldings));
@@ -398,10 +465,10 @@ export function TrackerProvider({ children }: { children: ReactNode }) {
       }));
       if (firestore && user) void queueCloudWrite(() => setHabitCompletion(firestore!, user.uid, habitId, date, completed));
     },
-    toggleMess: (date) => {
-      const completed = !state.messCompletions[date];
-      setOptimisticState((current) => ({ ...current, messCompletions: { ...current.messCompletions, [date]: completed } }));
-      if (firestore && user) void queueCloudWrite(() => setMessCompletion(firestore!, user.uid, date, completed));
+    toggleDailyCheckin: (date) => {
+      const completed = !state.dailyCheckins[date];
+      setOptimisticState((current) => ({ ...current, dailyCheckins: { ...current.dailyCheckins, [date]: completed } }));
+      if (firestore && user) void queueCloudWrite(() => setDailyCheckin(firestore!, user.uid, date, completed));
     },
     updateReportSettings: (reportSettings) => {
       setOptimisticState((current) => ({ ...current, reportSettings }));

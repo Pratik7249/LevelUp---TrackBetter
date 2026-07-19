@@ -30,7 +30,7 @@ export async function loadTrackerStateAdmin(uid: string): Promise<TrackerState |
     holdingsSnapshot,
     habitsSnapshot,
     habitLogsSnapshot,
-    messLogsSnapshot,
+    dailyCheckinsSnapshot,
     reportSnapshot,
     preferencesSnapshot
   ] = await Promise.all([
@@ -40,7 +40,7 @@ export async function loadTrackerStateAdmin(uid: string): Promise<TrackerState |
     userRef.collection("holdings").get(),
     userRef.collection("habits").get(),
     userRef.collection("habitLogs").get(),
-    userRef.collection("messLogs").get(),
+    userRef.collection("dailyCheckins").get(),
     userRef.collection("reports").doc("settings").get(),
     userRef.collection("settings").doc("preferences").get()
   ]);
@@ -78,14 +78,64 @@ export async function loadTrackerStateAdmin(uid: string): Promise<TrackerState |
   });
   const holdings: Holding[] = holdingsSnapshot.docs.map((item) => {
     const data = item.data();
+    const sip = data.sip && typeof data.sip === "object" ? data.sip as Record<string, unknown> : {};
+    const investmentDate = String(data.investmentDate ?? new Date().toISOString().slice(0, 10));
     return {
       id: item.id,
       name: String(data.name ?? "Holding"),
       ...(data.symbol ? { symbol: String(data.symbol) } : {}),
-      assetClass: data.assetClass ?? "Equity",
+      assetClass: data.assetClass ?? "Mutual Fund",
+      ...(data.fundCategory ? { fundCategory: data.fundCategory } : {}),
+      investmentDate,
       invested: Number(data.invested ?? 0),
       currentValue: Number(data.currentValue ?? 0),
-      monthlyValues: Array.isArray(data.monthlyValues) ? data.monthlyValues : []
+      goalAmount: Number(data.goalAmount ?? 0),
+      expectedAnnualReturn: Number(data.expectedAnnualReturn ?? 12) || 12,
+      returnSnapshot: (() => {
+        const snapshot = data.returnSnapshot && typeof data.returnSnapshot === "object"
+          ? data.returnSnapshot as Record<string, unknown>
+          : {};
+        const numberOrNull = (value: unknown) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        return {
+          asOfMonth: typeof snapshot.asOfMonth === "string" ? snapshot.asOfMonth : investmentDate.slice(0, 7),
+          threeMonth: numberOrNull(snapshot.threeMonth),
+          sixMonth: numberOrNull(snapshot.sixMonth),
+          oneYear: numberOrNull(snapshot.oneYear),
+          threeYear: numberOrNull(snapshot.threeYear),
+          fiveYear: numberOrNull(snapshot.fiveYear)
+        };
+      })(),
+      allocationBreakdown: Array.isArray(data.allocationBreakdown)
+        ? data.allocationBreakdown.map((entry: { category?: unknown; percentage?: unknown }) => ({
+            category: String(entry.category ?? "Other"),
+            percentage: Math.max(0, Number(entry.percentage ?? 0) || 0)
+          })).filter((entry: { percentage: number }) => entry.percentage > 0)
+        : data.fundCategory
+          ? [{ category: String(data.fundCategory), percentage: 100 }]
+          : [],
+      monthlyValues: Array.isArray(data.monthlyValues) ? data.monthlyValues : [],
+      additionalInvestments: Array.isArray(data.additionalInvestments) ? data.additionalInvestments : [],
+      sip: {
+        enabled: Boolean(sip.enabled),
+        amount: Number(sip.amount ?? 0),
+        ...(typeof sip.originalStartMonth === "string" && /^\d{4}-\d{2}$/.test(sip.originalStartMonth)
+          ? { originalStartMonth: sip.originalStartMonth }
+          : {}),
+        ...(Number(sip.previousAmount ?? 0) > 0
+          ? { previousAmount: Number(sip.previousAmount) }
+          : {}),
+        ...(typeof sip.lastPaidMonth === "string" && /^\d{4}-\d{2}$/.test(sip.lastPaidMonth)
+          ? { lastPaidMonth: sip.lastPaidMonth }
+          : {}),
+        startDate: String(sip.startDate ?? investmentDate),
+        trackingStartDate: String(sip.trackingStartDate ?? new Date().toISOString().slice(0, 10)),
+        dayOfMonth: Math.min(28, Math.max(1, Number(sip.dayOfMonth ?? 1) || 1)),
+        accountId: String(sip.accountId ?? ""),
+        stepUpPercent: Math.max(0, Number(sip.stepUpPercent ?? 0) || 0)
+      }
     } as Holding;
   });
   const habits: Habit[] = habitsSnapshot.docs.map((item) => {
@@ -97,19 +147,19 @@ export async function loadTrackerStateAdmin(uid: string): Promise<TrackerState |
       completions: completions.get(item.id) ?? {}
     };
   });
-  const messCompletions = Object.fromEntries(messLogsSnapshot.docs.map((item) => {
+  const dailyCheckins = Object.fromEntries(dailyCheckinsSnapshot.docs.map((item) => {
     const data = item.data();
     return [String(data.dateKey ?? item.id), Boolean(data.completed)];
   }));
 
   return normalizeState({
-    schemaVersion: 3,
+    schemaVersion: 4,
     accounts: accounts.length ? accounts : defaults.accounts,
     categories: categories.length ? categories : defaults.categories,
     transactions: transactionsSnapshot.docs.map(transactionFromDocument),
     holdings,
     habits: habits.length ? habits : defaults.habits,
-    messCompletions,
+    dailyCheckins,
     reportSettings: { ...defaults.reportSettings, ...(reportSnapshot.exists ? reportSnapshot.data() : {}) } as ReportSettings,
     preferences: { ...defaults.preferences, ...(preferencesSnapshot.exists ? preferencesSnapshot.data() : {}) }
   });

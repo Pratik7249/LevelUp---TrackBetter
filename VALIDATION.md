@@ -1,12 +1,7 @@
-# Validation results
-
-Validated on 19 July 2026:
+# Validation
 
 - `npm ci`: passed
 - `npm run typecheck`: passed
-- `next build`: passed
-- Generated pages: 14/14
-- `/overview`: HTTP 200 in production mode
-- `/login`: HTTP 200 in production mode
-- `/api/reports/send` without authentication: HTTP 401
-- ZIP excludes `.env.local`, `node_modules` and `.next`
+- `npm run build`: passed
+- Next.js generated all 14 routes successfully
+- No `.env.local`, `.next`, or `node_modules` included in the release ZIP

@@ -14,7 +14,7 @@ service cloud.firestore {
       allow delete: if false;
 
       // Covers settings, accounts, categories, transactions, holdings,
-      // portfolioSnapshots, habits, habitLogs, messLogs and reports.
+      // portfolioSnapshots, habits, habitLogs, dailyCheckins and reports.
       match /{document=**} {
         allow read, write: if owns(userId);
       }

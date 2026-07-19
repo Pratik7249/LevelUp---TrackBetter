@@ -19,6 +19,7 @@ import {
   type Firestore,
   type Unsubscribe
 } from "firebase/firestore";
+import { holdingInvestedAt, holdingValueAtMonth, rangeForMonth, toMonthInput } from "@/lib/analytics";
 import { monthSnapshotKey, stripUndefinedDeep } from "@/lib/firestore-utils";
 import { cloneDefaultState, normalizeState } from "@/lib/sample-data";
 import type {
@@ -40,6 +41,7 @@ const SUBCOLLECTIONS = [
   "portfolioSnapshots",
   "habits",
   "habitLogs",
+  "dailyCheckins",
   "messLogs"
 ] as const;
 
@@ -92,9 +94,42 @@ function holdingPayload(holding: Holding) {
   return stripUndefinedDeep({
     ...holding,
     symbol: holding.symbol?.trim() || null,
+    fundCategory: holding.fundCategory ?? null,
+    investmentDate: holding.investmentDate,
     invested: Number(holding.invested) || 0,
     currentValue: Number(holding.currentValue) || 0,
+    goalAmount: Number(holding.goalAmount) || 0,
+    expectedAnnualReturn: Number(holding.expectedAnnualReturn) || 12,
+    returnSnapshot: {
+      asOfMonth: holding.returnSnapshot?.asOfMonth || holding.investmentDate.slice(0, 7),
+      threeMonth: holding.returnSnapshot?.threeMonth ?? null,
+      sixMonth: holding.returnSnapshot?.sixMonth ?? null,
+      oneYear: holding.returnSnapshot?.oneYear ?? null,
+      threeYear: holding.returnSnapshot?.threeYear ?? null,
+      fiveYear: holding.returnSnapshot?.fiveYear ?? null
+    },
+    allocationBreakdown: Array.isArray(holding.allocationBreakdown)
+      ? holding.allocationBreakdown
+          .map((entry) => ({
+            category: entry.category,
+            percentage: Math.max(0, Number(entry.percentage) || 0)
+          }))
+          .filter((entry) => entry.percentage > 0)
+      : [],
     monthlyValues: Array.isArray(holding.monthlyValues) ? holding.monthlyValues : [],
+    additionalInvestments: Array.isArray(holding.additionalInvestments) ? holding.additionalInvestments : [],
+    sip: {
+      enabled: Boolean(holding.sip.enabled),
+      amount: Number(holding.sip.amount) || 0,
+      originalStartMonth: holding.sip.originalStartMonth || null,
+      previousAmount: Number(holding.sip.previousAmount) || 0,
+      lastPaidMonth: holding.sip.lastPaidMonth || null,
+      startDate: holding.sip.startDate,
+      trackingStartDate: holding.sip.trackingStartDate || holding.sip.startDate,
+      dayOfMonth: Math.min(28, Math.max(1, Number(holding.sip.dayOfMonth) || 1)),
+      accountId: holding.sip.accountId || "",
+      stepUpPercent: Math.max(0, Number(holding.sip.stepUpPercent) || 0)
+    },
     updatedAt: serverTimestamp()
   });
 }
@@ -111,8 +146,10 @@ function habitPayload(habit: Habit) {
 }
 
 function snapshotPayload(holdings: Holding[]) {
-  const investedAmount = holdings.reduce((sum, item) => sum + item.invested, 0);
-  const currentValue = holdings.reduce((sum, item) => sum + item.currentValue, 0);
+  const month = toMonthInput();
+  const asOfDate = rangeForMonth(month).to;
+  const investedAmount = holdings.reduce((sum, item) => sum + holdingInvestedAt(item, asOfDate), 0);
+  const currentValue = holdings.reduce((sum, item) => sum + holdingValueAtMonth(item, month), 0);
   const gainAmount = currentValue - investedAmount;
   return {
     investedAmount,
@@ -120,6 +157,7 @@ function snapshotPayload(holdings: Holding[]) {
     gainAmount,
     gainPercentage: investedAmount ? (gainAmount / investedAmount) * 100 : 0,
     holdingsCount: holdings.length,
+    month,
     recordedAt: serverTimestamp(),
     source: "web"
   };
@@ -222,8 +260,8 @@ async function migrateLegacyState(db: Firestore, uid: string, state: TrackerStat
       data: { habitId: habit.id, dateKey, completed: Boolean(completed), source: "legacy-web", updatedAt: serverTimestamp() }
     }));
   });
-  Object.entries(state.messCompletions).forEach(([dateKey, completed]) => operations.push({
-    ref: doc(db, "users", uid, "messLogs", dateKey),
+  Object.entries(state.dailyCheckins).forEach(([dateKey, completed]) => operations.push({
+    ref: doc(db, "users", uid, "dailyCheckins", dateKey),
     data: { dateKey, completed: Boolean(completed), source: "legacy-web", updatedAt: serverTimestamp() }
   }));
   operations.push({
@@ -241,7 +279,7 @@ async function migrateLegacyState(db: Firestore, uid: string, state: TrackerStat
 
   await commitSetOperations(db, operations);
   await setDoc(userDocument(db, uid), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     reportAutomationEnabled: Boolean(state.reportSettings.enabled),
     updatedAt: serverTimestamp()
   }, { merge: true });
@@ -256,7 +294,7 @@ export async function initializeUserWorkspace(db: Firestore, user: User) {
     email: user.email ?? "",
     photoURL: user.photoURL ?? "",
     provider: "google",
-    schemaVersion: 3,
+    schemaVersion: 4,
     timezone: "Asia/Kolkata",
     ...(rootSnapshot.exists() ? {} : { createdAt: serverTimestamp() }),
     updatedAt: serverTimestamp()
@@ -283,7 +321,7 @@ export type WorkspaceCallbacks = {
   holdings: (items: Holding[]) => void;
   habits: (items: Array<Omit<Habit, "completions">>) => void;
   habitLogs: (items: Array<{ habitId: string; dateKey: string; completed: boolean }>) => void;
-  messLogs: (items: Record<string, boolean>) => void;
+  dailyCheckins: (items: Record<string, boolean>) => void;
   reports: (settings: ReportSettings) => void;
   preferences: (preferences: AppPreferences) => void;
   error: (error: Error) => void;
@@ -335,14 +373,74 @@ export function subscribeToWorkspace(db: Firestore, uid: string, callbacks: Work
   unsubs.push(onSnapshot(collection(db, "users", uid, "holdings"), (snapshot) => {
     callbacks.holdings(snapshot.docs.map((item) => {
       const data = item.data();
+      const sip = data.sip && typeof data.sip === "object" ? data.sip as Record<string, unknown> : {};
+      const investmentDate = String(data.investmentDate ?? new Date().toISOString().slice(0, 10));
+      const monthlyValues = Array.isArray(data.monthlyValues)
+        ? data.monthlyValues.map((point: { month?: unknown; value?: unknown }) => ({ month: String(point.month ?? ""), value: Number(point.value ?? 0) }))
+        : [];
       return {
         id: item.id,
         name: String(data.name ?? "Holding"),
         ...(data.symbol ? { symbol: String(data.symbol) } : {}),
-        assetClass: data.assetClass ?? "Equity",
+        assetClass: data.assetClass ?? "Mutual Fund",
+        ...(data.fundCategory ? { fundCategory: data.fundCategory } : {}),
+        investmentDate,
         invested: Number(data.invested ?? 0),
         currentValue: Number(data.currentValue ?? 0),
-        monthlyValues: Array.isArray(data.monthlyValues) ? data.monthlyValues : []
+        goalAmount: Number(data.goalAmount ?? 0),
+        expectedAnnualReturn: Number(data.expectedAnnualReturn ?? 12) || 12,
+        returnSnapshot: (() => {
+          const snapshot = data.returnSnapshot && typeof data.returnSnapshot === "object"
+            ? data.returnSnapshot as Record<string, unknown>
+            : {};
+          const numberOrNull = (value: unknown) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+          };
+          return {
+            asOfMonth: typeof snapshot.asOfMonth === "string" ? snapshot.asOfMonth : investmentDate.slice(0, 7),
+            threeMonth: numberOrNull(snapshot.threeMonth),
+            sixMonth: numberOrNull(snapshot.sixMonth),
+            oneYear: numberOrNull(snapshot.oneYear),
+            threeYear: numberOrNull(snapshot.threeYear),
+            fiveYear: numberOrNull(snapshot.fiveYear)
+          };
+        })(),
+        allocationBreakdown: Array.isArray(data.allocationBreakdown)
+          ? data.allocationBreakdown.map((entry: { category?: unknown; percentage?: unknown }) => ({
+              category: String(entry.category ?? "Other"),
+              percentage: Math.max(0, Number(entry.percentage ?? 0) || 0)
+            })).filter((entry: { percentage: number }) => entry.percentage > 0)
+          : data.fundCategory
+            ? [{ category: String(data.fundCategory), percentage: 100 }]
+            : [],
+        monthlyValues,
+        additionalInvestments: Array.isArray(data.additionalInvestments)
+          ? data.additionalInvestments.map((entry: { id?: unknown; date?: unknown; amount?: unknown; label?: unknown }) => ({
+              id: String(entry.id ?? "entry"),
+              date: String(entry.date ?? investmentDate),
+              amount: Number(entry.amount ?? 0),
+              ...(entry.label ? { label: String(entry.label) } : {})
+            }))
+          : [],
+        sip: {
+          enabled: Boolean(sip.enabled),
+          amount: Number(sip.amount ?? 0),
+          ...(typeof sip.originalStartMonth === "string" && /^\d{4}-\d{2}$/.test(sip.originalStartMonth)
+            ? { originalStartMonth: sip.originalStartMonth }
+            : {}),
+          ...(Number(sip.previousAmount ?? 0) > 0
+            ? { previousAmount: Number(sip.previousAmount) }
+            : {}),
+          ...(typeof sip.lastPaidMonth === "string" && /^\d{4}-\d{2}$/.test(sip.lastPaidMonth)
+            ? { lastPaidMonth: sip.lastPaidMonth }
+            : {}),
+          startDate: String(sip.startDate ?? investmentDate),
+          trackingStartDate: String(sip.trackingStartDate ?? new Date().toISOString().slice(0, 10)),
+          dayOfMonth: Math.min(28, Math.max(1, Number(sip.dayOfMonth ?? 1) || 1)),
+          accountId: String(sip.accountId ?? ""),
+          stepUpPercent: Math.max(0, Number(sip.stepUpPercent ?? 0) || 0)
+        }
       } as Holding;
     }).sort((a, b) => a.name.localeCompare(b.name)));
   }, onError));
@@ -361,8 +459,8 @@ export function subscribeToWorkspace(db: Firestore, uid: string, callbacks: Work
     }).filter((item) => item.habitId && item.dateKey));
   }, onError));
 
-  unsubs.push(onSnapshot(collection(db, "users", uid, "messLogs"), (snapshot) => {
-    callbacks.messLogs(Object.fromEntries(snapshot.docs.map((item) => {
+  unsubs.push(onSnapshot(collection(db, "users", uid, "dailyCheckins"), (snapshot) => {
+    callbacks.dailyCheckins(Object.fromEntries(snapshot.docs.map((item) => {
       const data = item.data();
       return [String(data.dateKey ?? item.id), Boolean(data.completed)];
     })));
@@ -385,8 +483,10 @@ export async function createTransaction(db: Firestore, uid: string, transaction:
   const transactionRef = doc(db, "users", uid, "transactions", transaction.id);
   const accountRef = doc(db, "users", uid, "accounts", transaction.accountId);
   await runTransaction(db, async (operation) => {
+    const transactionSnapshot = await operation.get(transactionRef);
+    if (transactionSnapshot.exists()) return;
     const accountSnapshot = await operation.get(accountRef);
-    operation.set(transactionRef, { ...transactionPayload(transaction), createdAt: serverTimestamp() });
+    operation.set(transactionRef, { ...transactionPayload(transaction, transaction.id.startsWith("sip-") ? "sip-auto" : "web"), createdAt: serverTimestamp() });
     if (accountSnapshot.exists()) {
       const currentBalance = Number(accountSnapshot.data().balance ?? 0);
       const delta = transaction.type === "income" ? transaction.amount : -transaction.amount;
@@ -466,10 +566,11 @@ export async function setHabitCompletion(db: Firestore, uid: string, habitId: st
   }, { merge: true });
 }
 
-export async function setMessCompletion(db: Firestore, uid: string, dateKey: string, completed: boolean) {
-  await setDoc(doc(db, "users", uid, "messLogs", dateKey), {
+export async function setDailyCheckin(db: Firestore, uid: string, dateKey: string, completed: boolean) {
+  await setDoc(doc(db, "users", uid, "dailyCheckins", dateKey), {
     dateKey,
     completed,
+    label: "Main priority completed",
     source: "web",
     updatedAt: serverTimestamp()
   }, { merge: true });
@@ -489,6 +590,10 @@ export async function saveReportSettings(db: Firestore, uid: string, settings: R
 export async function savePreferences(db: Firestore, uid: string, preferences: AppPreferences) {
   await setDoc(doc(db, "users", uid, "settings", "preferences"), {
     ...preferences,
+    portfolioGoalAmount: Number(preferences.portfolioGoalAmount) || 0,
+    portfolioGoalDate: preferences.portfolioGoalDate || "",
+    portfolioExpectedReturn: Number(preferences.portfolioExpectedReturn) || 12,
+    portfolioDefaultStepUpPercent: Math.max(0, Number(preferences.portfolioDefaultStepUpPercent) || 0),
     updatedAt: serverTimestamp()
   }, { merge: true });
 }
@@ -509,7 +614,7 @@ export async function resetWorkspace(db: Firestore, uid: string) {
   references.push(doc(db, "users", uid, "tracker", "state"));
   await deleteDocuments(db, references);
   await setDoc(userDocument(db, uid), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     reportAutomationEnabled: false,
     reportEmail: "",
     updatedAt: serverTimestamp()

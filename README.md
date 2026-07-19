@@ -1,6 +1,6 @@
 # TrackBetter
 
-A deployment-ready Next.js personal tracker for finance, investments, habits, mess tracking and scheduled email reports.
+A deployment-ready Next.js personal tracker for finance, advanced portfolio analytics, habits, daily focus check-ins and scheduled email reports.
 
 ## What changed in this release
 
@@ -26,7 +26,7 @@ users/{uid}
 ├── portfolioSnapshots/{YYYY-MM-01}
 ├── habits/{habitId}
 ├── habitLogs/{habitId}_{YYYY-MM-DD}
-├── messLogs/{YYYY-MM-DD}
+├── dailyCheckins/{YYYY-MM-DD}
 └── reports/settings
 ```
 
@@ -109,3 +109,12 @@ users/{uid}/tracker/state
 ```
 
 and the new collections are empty, TrackBetter migrates the old arrays into the new collections and then deletes the legacy state document.
+
+
+## Advanced portfolio behavior
+
+- Every holding stores its investment date, initial amount, optional fund category, individual goal, monthly valuations, additional dated investments and SIP plan.
+- Mutual funds and ETFs can be classified as Large Cap, Mid Cap, Small Cap, Flexi Cap, Multi Cap, Index Fund, ELSS, Hybrid, Debt Fund, Liquid Fund, International, Sectoral / Thematic or Other.
+- Portfolio totals are calculated for the selected month. The dashboard shows invested amount, current value, absolute return and XIRR for each holding and the full portfolio.
+- When a SIP installment becomes due, the client creates a deterministic investment transaction such as `sip-{holdingId}-{YYYY-MM}`. Firestore transactions prevent duplicate account deductions when the web app and mobile app are open together.
+- The old default mess tracker has been replaced with `dailyCheckins`, which records whether the user completed the main priority for each day.
